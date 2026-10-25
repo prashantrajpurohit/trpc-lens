@@ -1,3 +1,5 @@
+import type { InspectorMode } from "./env";
+
 export const REDACTED = "[REDACTED]";
 
 export interface SanitizeOptions {
@@ -7,6 +9,12 @@ export interface SanitizeOptions {
   maxBytes?: number;
   /** Object keys matching this pattern have their values redacted. */
   sensitive?: RegExp;
+  /**
+   * "shape" (the default) keeps structure and keys but replaces every
+   * primitive leaf with a type descriptor. "full" keeps values. Any value
+   * other than "full" is treated as "shape".
+   */
+  mode?: InspectorMode;
 }
 
 const DEFAULT_SENSITIVE =
@@ -22,9 +30,12 @@ function matches(re: RegExp, s: string): boolean {
   return re.test(s);
 }
 
+const describeString = (s: string): string => `string(${s.length})`;
+
 /**
  * Makes an arbitrary value safe to serialize and ship: redacts sensitive keys,
  * breaks cycles, and bounds depth, string length, array length and total size.
+ * In "shape" mode (the default) no original primitive value survives.
  * Never throws.
  */
 export function sanitize(
@@ -36,6 +47,8 @@ export function sanitize(
   const maxArray = opts.maxArray ?? 50;
   const maxBytes = opts.maxBytes ?? 50_000;
   const sensitive = opts.sensitive ?? DEFAULT_SENSITIVE;
+  // Fail closed: only an explicit "full" keeps values.
+  const shape = opts.mode !== "full";
 
   let truncated = false;
   // Objects on the current path only, so shared (non-circular) references
@@ -45,17 +58,21 @@ export function sanitize(
   const walk = (v: unknown, depth: number): unknown => {
     switch (typeof v) {
       case "string":
+        if (shape) return describeString(v);
         if (v.length > maxString) {
           truncated = true;
           return v.slice(0, maxString) + TRUNCATED_SUFFIX;
         }
         return v;
+      case "number":
+      case "boolean":
+        return shape ? typeof v : v;
       case "bigint":
-        return `${v}n`;
+        return shape ? "bigint" : `${v}n`;
       case "function":
         return "[Function]";
       case "symbol":
-        return v.toString();
+        return shape ? "symbol" : v.toString();
       case "object":
         break;
       default:
@@ -64,10 +81,14 @@ export function sanitize(
     if (v === null) return null;
 
     if (v instanceof Date) {
+      if (shape) return "date";
       return Number.isNaN(v.getTime()) ? "Invalid Date" : v.toISOString();
     }
     if (v instanceof Error) {
-      return { name: v.name, message: v.message };
+      const { name, message } = v;
+      return shape
+        ? { name: walk(name, depth + 1), message: walk(message, depth + 1) }
+        : { name, message };
     }
     if (ancestors.has(v)) return "[Circular]";
     if (depth >= maxDepth) {
@@ -78,8 +99,12 @@ export function sanitize(
     ancestors.add(v);
     try {
       if (Array.isArray(v)) {
-        if (v.length > maxArray) truncated = true;
-        return v.slice(0, maxArray).map((item) => walk(item, depth + 1));
+        const items = v.slice(0, maxArray).map((item) => walk(item, depth + 1));
+        if (v.length > maxArray) {
+          truncated = true;
+          if (shape) items.push(`…(${v.length} total)`);
+        }
+        return items;
       }
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(v)) {
@@ -110,11 +135,14 @@ const RELATIVE_BASE = "http://relative.invalid";
 
 /**
  * Strips credentials and sensitive query params from a URL, and sanitizes the
- * JSON `input` param that tRPC GET requests carry. Never throws.
+ * JSON `input` param that tRPC GET requests carry. In "shape" mode (the
+ * default) the path is kept but every other param value becomes a descriptor.
+ * Never throws.
  */
 export function sanitizeUrl(raw: string, opts?: SanitizeOptions): string {
   try {
     if (typeof raw !== "string") return "[invalid-url]";
+    const shape = opts?.mode !== "full";
     const absolute = ABSOLUTE_URL.test(raw);
     const url = absolute ? new URL(raw) : new URL(raw, RELATIVE_BASE);
 
@@ -132,8 +160,10 @@ export function sanitizeUrl(raw: string, opts?: SanitizeOptions): string {
             clean = "[unparseable]";
           }
           params.append(name, clean);
+        } else if (SENSITIVE_PARAM.test(name)) {
+          params.append(name, REDACTED);
         } else {
-          params.append(name, SENSITIVE_PARAM.test(name) ? REDACTED : value);
+          params.append(name, shape ? describeString(value) : value);
         }
       }
       url.search = params.toString();
