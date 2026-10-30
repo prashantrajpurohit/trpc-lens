@@ -40,6 +40,22 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
 
+  packages/sdk:
+    dependencies:
+      '@prashant-rajpurohit/trpc-inspector-core':
+        specifier: workspace:*
+        version: link:../core
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@prashant-rajpurohit/trpc-inspector-bridge':
+        specifier: workspace:*
+        version: link:../bridge
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':
