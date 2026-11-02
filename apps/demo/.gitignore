@@ -1,0 +1,3 @@
+# The root ignores .env*; the example holds no secrets and is committed.
+!.env.local.example
+*.tsbuildinfo
